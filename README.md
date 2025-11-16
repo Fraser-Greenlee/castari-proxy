@@ -38,8 +38,6 @@ A full-stack Next.js reference implementation of the Claude Agent SDK featuring:
 - Image upload support, extended thinking controls, session management
 - Transcript recording and permission policies
 
-**For detailed architecture documentation, see [ARCHITECTURE.md](ARCHITECTURE.md).**
-
 ## Table of Contents
 1. [Repo Overview](#repo-overview)
 2. [Demo App](#demo-app)
