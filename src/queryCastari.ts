@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { query, type Options, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
-export type Provider = 'anthropic' | 'openrouter';
+export type Provider = 'anthropic' | 'openrouter' | 'vllm' | 'sglang';
 
 export interface ProviderCredentials {
   apiKey?: string;
@@ -10,6 +10,8 @@ export interface ProviderCredentials {
 export interface CastariProviders {
   openrouter?: ProviderCredentials;
   anthropic?: ProviderCredentials;
+  vllm?: ProviderCredentials;
+  sglang?: ProviderCredentials;
 }
 
 export type ReasoningEffortPreference = 'auto' | 'low' | 'medium' | 'high' | 'max';
@@ -64,6 +66,8 @@ const HDR_WIRE_MODEL = 'x-castari-wire-model';
 export function resolveProvider(model: string): Provider {
   const normalized = model.trim();
   if (!normalized) throw new Error('model must be a non-empty string');
+  if (normalized.startsWith('vllm:') || normalized.startsWith('vllm/')) return 'vllm';
+  if (normalized.startsWith('sglang:') || normalized.startsWith('sglang/')) return 'sglang';
   if (normalized.startsWith('or:') || normalized.startsWith('openrouter/')) return 'openrouter';
   if (normalized.startsWith('openai/')) return 'openrouter';
   if (normalized.startsWith('anthropic/')) return 'anthropic';
@@ -82,6 +86,13 @@ export function resolveWireModel(model: string, provider: Provider, defaultVendo
     }
     if (model.startsWith('openrouter/')) return model.substring('openrouter/'.length);
     if (model.startsWith('openai/')) return model;
+    return model;
+  }
+  if (provider === 'vllm' || provider === 'sglang') {
+    const colonPrefix = `${provider}:`;
+    if (model.startsWith(colonPrefix)) return model.slice(colonPrefix.length);
+    const slashPrefix = `${provider}/`;
+    if (model.startsWith(slashPrefix)) return model.slice(slashPrefix.length);
     return model;
   }
   return model;
@@ -133,8 +144,13 @@ export function queryCastari({
 
   const credential = getCredentialsForProvider(provider, providers, effectiveEnv);
   if (!credential) {
-    const missing = provider === 'openrouter' ? 'OPENROUTER_API_KEY' : 'ANTHROPIC_API_KEY';
-    throw new Error(`${missing} is required for model ${model}`);
+    const envVarMap: Record<Provider, string> = {
+      anthropic: 'ANTHROPIC_API_KEY',
+      openrouter: 'OPENROUTER_API_KEY',
+      vllm: 'VLLM_API_KEY',
+      sglang: 'SGLANG_API_KEY',
+    };
+    throw new Error(`${envVarMap[provider]} is required for model ${model}`);
   }
   effectiveEnv.ANTHROPIC_API_KEY = credential;
   effectiveEnv.ANTHROPIC_BASE_URL = baseUrl;
@@ -285,6 +301,12 @@ function getCredentialsForProvider(
 ): string | undefined {
   if (provider === 'openrouter') {
     return providers?.openrouter?.apiKey ?? env.OPENROUTER_API_KEY;
+  }
+  if (provider === 'vllm') {
+    return providers?.vllm?.apiKey ?? env.VLLM_API_KEY ?? 'no-auth';
+  }
+  if (provider === 'sglang') {
+    return providers?.sglang?.apiKey ?? env.SGLANG_API_KEY ?? 'no-auth';
   }
   return providers?.anthropic?.apiKey ?? env.ANTHROPIC_API_KEY;
 }

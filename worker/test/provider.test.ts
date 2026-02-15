@@ -5,6 +5,8 @@ import { resolveConfig } from '../src/config';
 const config = resolveConfig({
   UPSTREAM_ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
   UPSTREAM_OPENROUTER_BASE_URL: 'https://openrouter.ai/api',
+  UPSTREAM_VLLM_BASE_URL: 'http://localhost:8000',
+  UPSTREAM_SGLANG_BASE_URL: 'http://localhost:30000',
   SERVER_TOOLS_MODE: 'error',
   OPENROUTER_DEFAULT_VENDOR: 'openai',
 });
@@ -28,6 +30,58 @@ describe('resolveProvider', () => {
     );
     expect(result.provider).toBe('anthropic');
     expect(result.wireModel).toBe('claude-3-5');
+  });
+
+  it('detects vllm: prefix and strips it for wire model', () => {
+    const result = resolveProvider(
+      {},
+      { model: 'vllm:meta-llama/Llama-3-70b', messages: [], metadata: {} } as any,
+      config,
+    );
+    expect(result.provider).toBe('vllm');
+    expect(result.wireModel).toBe('meta-llama/Llama-3-70b');
+    expect(result.originalModel).toBe('vllm:meta-llama/Llama-3-70b');
+  });
+
+  it('detects vllm/ prefix and strips it for wire model', () => {
+    const result = resolveProvider(
+      {},
+      { model: 'vllm/my-local-model', messages: [], metadata: {} } as any,
+      config,
+    );
+    expect(result.provider).toBe('vllm');
+    expect(result.wireModel).toBe('my-local-model');
+  });
+
+  it('detects sglang: prefix and strips it for wire model', () => {
+    const result = resolveProvider(
+      {},
+      { model: 'sglang:deepseek-ai/DeepSeek-V3', messages: [], metadata: {} } as any,
+      config,
+    );
+    expect(result.provider).toBe('sglang');
+    expect(result.wireModel).toBe('deepseek-ai/DeepSeek-V3');
+    expect(result.originalModel).toBe('sglang:deepseek-ai/DeepSeek-V3');
+  });
+
+  it('detects sglang/ prefix and strips it for wire model', () => {
+    const result = resolveProvider(
+      {},
+      { model: 'sglang/my-model', messages: [], metadata: {} } as any,
+      config,
+    );
+    expect(result.provider).toBe('sglang');
+    expect(result.wireModel).toBe('my-model');
+  });
+
+  it('uses header provider override for vllm', () => {
+    const result = resolveProvider(
+      { provider: 'vllm', wireModel: 'custom-model' },
+      { model: 'vllm:custom-model', messages: [], metadata: {} } as any,
+      config,
+    );
+    expect(result.provider).toBe('vllm');
+    expect(result.wireModel).toBe('custom-model');
   });
 });
 

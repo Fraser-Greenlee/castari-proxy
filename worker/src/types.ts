@@ -1,4 +1,4 @@
-export type Provider = 'anthropic' | 'openrouter';
+export type Provider = 'anthropic' | 'openrouter' | 'vllm' | 'sglang';
 
 export type ServerToolsMode = 'error' | 'enforceAnthropic' | 'emulate';
 export type McpBridgeMode = 'off' | 'http-sse';
@@ -193,6 +193,8 @@ export interface ProviderAuth {
 export interface WorkerConfig {
   anthropicBaseUrl: string;
   openRouterBaseUrl: string;
+  vllmBaseUrl: string;
+  sglangBaseUrl: string;
   serverToolsMode: ServerToolsMode;
   mcpMode: McpBridgeMode;
   defaultOpenRouterVendor: string;

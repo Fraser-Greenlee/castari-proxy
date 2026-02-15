@@ -1,7 +1,7 @@
 import { resolveConfig, Env } from './config';
 import { errorResponse, authenticationError, invalidRequest } from './errors';
 import { normalizeCastariHeaders, readJsonBody } from './utils';
-import { categorizeServerTools, detectServerTools, resolveProvider } from './provider';
+import { categorizeServerTools, resolveProvider } from './provider';
 import { buildOpenRouterRequest, mapOpenRouterResponse } from './translator';
 import { streamOpenRouterToAnthropic } from './stream';
 import {
@@ -9,6 +9,7 @@ import {
   AnthropicResponse,
   CastariMetadata,
   CastariReasoningConfig,
+  Provider,
   WebSearchOptions,
   WorkerConfig,
 } from './types';
@@ -23,18 +24,25 @@ export default {
       const config = resolveConfig(env);
       const headers = normalizeCastariHeaders(request.headers);
       const body = await readJsonBody<AnthropicRequest>(request.clone());
-      const authHeader = extractApiKey(request.headers);
       const metadata = normalizeMetadata(body.metadata);
       const reasoning = metadata?.castari?.reasoning as CastariReasoningConfig | undefined;
       let webSearch = metadata?.castari?.web_search_options as WebSearchOptions | undefined;
 
       let { provider, wireModel, originalModel } = resolveProvider(headers, body, config);
 
+      // vLLM and SGLang don't require auth; all other providers do.
+      const optionalAuthProviders: Provider[] = ['vllm', 'sglang'];
+      const apiKey = optionalAuthProviders.includes(provider)
+        ? extractOptionalApiKey(request.headers)
+        : extractApiKey(request.headers).value;
+
       const serverToolEntries = categorizeServerTools(body.tools);
       const webSearchTools = serverToolEntries.filter((entry) => entry.kind === 'websearch');
       const otherServerTools = serverToolEntries.filter((entry) => entry.kind === 'other');
 
-      if (provider === 'openrouter' && otherServerTools.length) {
+      const isNonAnthropicProvider = provider !== 'anthropic';
+
+      if (isNonAnthropicProvider && otherServerTools.length) {
         if (config.serverToolsMode === 'error') {
           throw invalidRequest('Server tools require Anthropic provider', {
             tools: otherServerTools.map((entry) => entry.label),
@@ -54,19 +62,36 @@ export default {
         }
       }
 
-      if (body.mcp_servers?.length && provider === 'openrouter' && env.MCP_BRIDGE_MODE !== 'http-sse') {
+      if (body.mcp_servers?.length && provider !== 'anthropic' && env.MCP_BRIDGE_MODE !== 'http-sse') {
         throw invalidRequest('MCP servers require Anthropic routing or http-sse bridge', { mode: env.MCP_BRIDGE_MODE ?? 'off' });
       }
 
       if (provider === 'anthropic') {
-        return proxyAnthropic(body, request, authHeader.value, config.anthropicBaseUrl);
+        return proxyAnthropic(body, request, apiKey!, config.anthropicBaseUrl);
+      }
+
+      if (provider === 'vllm' || provider === 'sglang') {
+        const upstreamUrl = provider === 'vllm' ? config.vllmBaseUrl : config.sglangBaseUrl;
+        if (!upstreamUrl) {
+          throw invalidRequest(
+            `${provider} provider is not configured. Set UPSTREAM_${provider.toUpperCase()}_BASE_URL.`,
+          );
+        }
+        return handleOpenAICompatible({
+          body,
+          wireModel,
+          originalModel,
+          apiKey,
+          upstreamUrl,
+          providerName: provider,
+        });
       }
 
       return handleOpenRouter({
         body,
         wireModel,
         originalModel,
-        apiKey: authHeader.value,
+        apiKey: apiKey!,
         config,
         reasoning,
         webSearch,
@@ -91,6 +116,17 @@ function extractApiKey(headers: Headers): { value: string; type: 'x-api-key' | '
   const key = headers.get('x-api-key');
   if (key) return { value: key, type: 'x-api-key' };
   throw authenticationError('Missing API key');
+}
+
+function extractOptionalApiKey(headers: Headers): string | undefined {
+  const auth = headers.get('authorization');
+  if (auth && auth.toLowerCase().startsWith('bearer ')) {
+    const token = auth.slice(7).trim();
+    if (token && token !== 'no-auth') return token;
+  }
+  const key = headers.get('x-api-key');
+  if (key && key !== 'no-auth') return key;
+  return undefined;
 }
 
 async function proxyAnthropic(
@@ -133,6 +169,55 @@ interface OpenRouterContext {
   config: WorkerConfig;
   reasoning?: CastariReasoningConfig;
   webSearch?: WebSearchOptions;
+}
+
+interface OpenAICompatibleContext {
+  body: AnthropicRequest;
+  wireModel: string;
+  originalModel: string;
+  apiKey?: string;
+  upstreamUrl: string;
+  providerName: string;
+}
+
+async function handleOpenAICompatible(ctx: OpenAICompatibleContext): Promise<Response> {
+  const compatRequest = buildOpenRouterRequest(ctx.body, {
+    wireModel: ctx.wireModel,
+  });
+
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+  };
+  if (ctx.apiKey) {
+    headers.authorization = `Bearer ${ctx.apiKey}`;
+  }
+
+  const upstreamResp = await fetch(ctx.upstreamUrl, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(compatRequest),
+  });
+
+  if (ctx.body.stream) {
+    if (!upstreamResp.ok) {
+      const payload = await upstreamResp.text();
+      throw invalidRequest(`${ctx.providerName} streaming error`, { status: upstreamResp.status, body: payload });
+    }
+    return streamOpenRouterToAnthropic(upstreamResp, { originalModel: ctx.originalModel });
+  }
+
+  const json = await upstreamResp.json();
+  if (!upstreamResp.ok) {
+    throw invalidRequest(`${ctx.providerName} error`, { status: upstreamResp.status, body: json });
+  }
+  const responseBody: AnthropicResponse = mapOpenRouterResponse(json, ctx.originalModel);
+  return new Response(JSON.stringify(responseBody), {
+    status: 200,
+    headers: {
+      'content-type': 'application/json',
+      'cache-control': 'no-store',
+    },
+  });
 }
 
 async function handleOpenRouter(ctx: OpenRouterContext): Promise<Response> {

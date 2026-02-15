@@ -50,14 +50,21 @@ export function resolveProvider(
   const originalModel = body.model;
   const provider = headers.provider ?? inferProviderFromModel(originalModel);
   if (!provider) throw invalidRequest(`Unable to infer provider for model ${originalModel}`);
-  const wireModel = provider === 'openrouter'
-    ? resolveOpenRouterModel(headers.wireModel ?? originalModel, config.defaultOpenRouterVendor)
-    : originalModel;
+  let wireModel: string;
+  if (provider === 'openrouter') {
+    wireModel = resolveOpenRouterModel(headers.wireModel ?? originalModel, config.defaultOpenRouterVendor);
+  } else if (provider === 'vllm' || provider === 'sglang') {
+    wireModel = resolveCustomProviderModel(headers.wireModel ?? originalModel, provider);
+  } else {
+    wireModel = originalModel;
+  }
   return { provider, wireModel, originalModel };
 }
 
 function inferProviderFromModel(model: string): Provider | undefined {
   const normalized = model.toLowerCase();
+  if (normalized.startsWith('vllm:') || normalized.startsWith('vllm/')) return 'vllm';
+  if (normalized.startsWith('sglang:') || normalized.startsWith('sglang/')) return 'sglang';
   if (normalized.startsWith('claude') || normalized.startsWith('anthropic/')) return 'anthropic';
   if (normalized.startsWith('or:') || normalized.startsWith('openrouter/') || normalized.startsWith('openai/')) return 'openrouter';
   return 'anthropic';
@@ -71,6 +78,22 @@ function resolveOpenRouterModel(model: string, defaultVendor: string): string {
     return `${defaultVendor}/${slug}`;
   }
   if (model.startsWith('openrouter/')) return model.substring('openrouter/'.length);
+  return model;
+}
+
+function resolveCustomProviderModel(model: string, provider: 'vllm' | 'sglang'): string {
+  const prefix = `${provider}:`;
+  if (model.toLowerCase().startsWith(prefix)) {
+    const slug = model.slice(prefix.length);
+    if (!slug) throw invalidRequest(`${provider} model prefix "${prefix}" must include a model name`);
+    return slug;
+  }
+  const slashPrefix = `${provider}/`;
+  if (model.toLowerCase().startsWith(slashPrefix)) {
+    const slug = model.slice(slashPrefix.length);
+    if (!slug) throw invalidRequest(`${provider} model prefix "${slashPrefix}" must include a model name`);
+    return slug;
+  }
   return model;
 }
 
