@@ -13,3 +13,7 @@ UPSTREAM_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 UPSTREAM_OPENROUTER_BASE_URL = "https://openrouter.ai/api"
 UPSTREAM_VLLM_BASE_URL = ""
 UPSTREAM_SGLANG_BASE_URL = ""
+
+[[r2_buckets]]
+binding = "LOG_BUCKET"
+bucket_name = "castari-logs"

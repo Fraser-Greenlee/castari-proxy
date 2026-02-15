@@ -1,9 +1,10 @@
 import { resolveConfig, Env } from './config';
 import { errorResponse, authenticationError, invalidRequest } from './errors';
-import { normalizeCastariHeaders, readJsonBody } from './utils';
+import { normalizeCastariHeaders, readJsonBody, getHeader, randomId } from './utils';
 import { categorizeServerTools, resolveProvider } from './provider';
 import { buildOpenRouterRequest, mapOpenRouterResponse } from './translator';
 import { streamOpenRouterToAnthropic } from './stream';
+import { LogEntry, deriveTurnIndex, writeLogEntry, teeAndCollectStream } from './logger';
 import {
   AnthropicRequest,
   AnthropicResponse,
@@ -15,11 +16,17 @@ import {
 } from './types';
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     try {
       if (new URL(request.url).pathname !== '/v1/messages' || request.method !== 'POST') {
         return new Response('Not found', { status: 404 });
       }
+
+      const startTime = Date.now();
+      const requestId = randomId('req');
+      const sessionId = getHeader(request.headers, 'x-castari-session-id') ?? randomId('sess');
+      const clientMetaRaw = getHeader(request.headers, 'x-client-meta');
+      const clientMeta = clientMetaRaw ? safeParseJsonMeta(clientMetaRaw) : undefined;
 
       const config = resolveConfig(env);
       const headers = normalizeCastariHeaders(request.headers);
@@ -29,6 +36,8 @@ export default {
       let webSearch = metadata?.castari?.web_search_options as WebSearchOptions | undefined;
 
       let { provider, wireModel, originalModel } = resolveProvider(headers, body, config);
+
+      const turnIndex = deriveTurnIndex(body.messages);
 
       // vLLM and SGLang don't require auth; all other providers do.
       const optionalAuthProviders: Provider[] = ['vllm', 'sglang'];
@@ -66,8 +75,49 @@ export default {
         throw invalidRequest('MCP servers require Anthropic routing or http-sse bridge', { mode: env.MCP_BRIDGE_MODE ?? 'off' });
       }
 
+      // Build the base log entry (response filled in per-path)
+      const baseEntry: Omit<LogEntry, 'response' | 'latencyMs' | 'streaming'> = {
+        requestId,
+        sessionId,
+        turnIndex,
+        timestamp: new Date().toISOString(),
+        provider,
+        originalModel,
+        wireModel,
+        request: body,
+        clientMeta,
+      };
+
+      // Helper to schedule a log write in the background
+      const scheduleLog = (response: AnthropicResponse | null, streaming: boolean, error?: LogEntry['error']) => {
+        const entry: LogEntry = {
+          ...baseEntry,
+          response,
+          latencyMs: Date.now() - startTime,
+          streaming,
+          ...(error ? { error } : {}),
+        };
+        ctx.waitUntil(writeLogEntry(env.LOG_BUCKET, entry));
+      };
+
+      // Helper to handle a streaming response: tee the stream, log asynchronously
+      const logStreamingResponse = (resp: Response): Response => {
+        const { clientResponse, collected } = teeAndCollectStream(resp);
+        ctx.waitUntil(
+          collected.then((assembled) => scheduleLog(assembled, true)),
+        );
+        return clientResponse;
+      };
+
       if (provider === 'anthropic') {
-        return proxyAnthropic(body, request, apiKey!, config.anthropicBaseUrl);
+        const resp = await proxyAnthropic(body, request, apiKey!, config.anthropicBaseUrl);
+        if (!resp.ok) {
+          // Error responses are not streamed — log as-is
+          const errorText = await resp.clone().text();
+          scheduleLog(null, false, { status: resp.status, message: errorText.slice(0, 1000) });
+          return resp;
+        }
+        return logStreamingResponse(resp);
       }
 
       if (provider === 'vllm' || provider === 'sglang') {
@@ -77,7 +127,7 @@ export default {
             `${provider} provider is not configured. Set UPSTREAM_${provider.toUpperCase()}_BASE_URL.`,
           );
         }
-        return handleOpenAICompatible({
+        const resp = await handleOpenAICompatible({
           body,
           wireModel,
           originalModel,
@@ -85,9 +135,16 @@ export default {
           upstreamUrl,
           providerName: provider,
         });
+        if (body.stream) {
+          return logStreamingResponse(resp);
+        }
+        // Non-streaming: parse the response body for logging, then return it
+        const clonedBody = await resp.clone().json() as AnthropicResponse;
+        scheduleLog(clonedBody, false);
+        return resp;
       }
 
-      return handleOpenRouter({
+      const resp = await handleOpenRouter({
         body,
         wireModel,
         originalModel,
@@ -96,6 +153,12 @@ export default {
         reasoning,
         webSearch,
       });
+      if (body.stream) {
+        return logStreamingResponse(resp);
+      }
+      const clonedBody = await resp.clone().json() as AnthropicResponse;
+      scheduleLog(clonedBody, false);
+      return resp;
     } catch (error) {
       return errorResponse(error);
     }
@@ -256,4 +319,16 @@ async function handleOpenRouter(ctx: OpenRouterContext): Promise<Response> {
       'cache-control': 'no-store',
     },
   });
+}
+
+function safeParseJsonMeta(raw: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }

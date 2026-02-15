@@ -8,6 +8,7 @@ export interface Env {
   SERVER_TOOLS_MODE?: string;
   MCP_BRIDGE_MODE?: string;
   OPENROUTER_DEFAULT_VENDOR?: string;
+  LOG_BUCKET: R2Bucket;
 }
 
 const DEFAULT_ANTHROPIC_URL = 'https://api.anthropic.com';

@@ -46,6 +46,7 @@ interface InterceptorContext {
   provider: Provider;
   originalModel: string;
   wireModel: string;
+  sessionId: string;
   meta?: CastariMeta;
   reasoning?: ReasoningConfig;
   effectiveEffort?: ReasoningEffortPreference;
@@ -62,6 +63,7 @@ let interceptorInstalled = false;
 const HDR_MODEL = 'x-castari-model';
 const HDR_PROVIDER = 'x-castari-provider';
 const HDR_WIRE_MODEL = 'x-castari-wire-model';
+const HDR_SESSION_ID = 'x-castari-session-id';
 
 export function resolveProvider(model: string): Provider {
   const normalized = model.trim();
@@ -202,10 +204,15 @@ export function queryCastari({
     summary: effSummary,
   });
 
+  const sessionId = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+
   const ctx: InterceptorContext = {
     provider,
     originalModel: model,
     wireModel,
+    sessionId,
     meta,
     reasoning: normalizeReasoning(reasoning, effEffort, effSummary, fallbackMaxThinking),
     effectiveEffort: effEffort,
@@ -234,6 +241,7 @@ function ensureInterceptorInstalled(): void {
       headers.set(HDR_PROVIDER, ctx.provider);
       headers.set(HDR_MODEL, ctx.originalModel);
       headers.set(HDR_WIRE_MODEL, ctx.wireModel);
+      headers.set(HDR_SESSION_ID, ctx.sessionId);
 
       const workerToken = ctx.workerToken;
       if (workerToken && !headers.has('x-worker-token')) headers.set('x-worker-token', workerToken);
